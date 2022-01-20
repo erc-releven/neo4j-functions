@@ -1,8 +1,7 @@
 package eu.r11;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.neo4j.graphdb.*;
@@ -25,6 +24,14 @@ public class GetPersonByIdent {
     @Context
     public GraphDatabaseService db;
 
+    // Our constants
+    private static final RelationshipType ev2p = RelationshipType.withName("crm_P140_assigned_attribute_to");
+    private static final RelationshipType ev2id = RelationshipType.withName("crm_P37_assigned");
+    private static final RelationshipType ev2ag = RelationshipType.withName("crm_P14_carried_out_by");
+    private static final String personClass = "crm_E21_Person";
+    private static final String assignment = "crm_E15_Identifier_Assignment";
+
+
     /**
      * This procedure takes a Node and gets the relationships going in and out of it
      *
@@ -34,74 +41,38 @@ public class GetPersonByIdent {
      */
     @Procedure(value = "eu.r11.getPersonByIdent")
     @Description("Get an E21_Person node based on identifier assignment and agent.")
-    public Stream<Node> getPersonByIdent(@Name("ident") String ident, @Name("authority") String authority) {
-        String q = String.format("MATCH (ass:crm_E15_Identifier_Assignment)-[:crm_P37_assigned]->(idlabel:crm_E42_Identifier {value:'%s'}), " +
-                "(ass)-[:crm_P14_carried_out_by]->(agent:crm_E39_Actor {identifier:'%s'), " +
-                "(ass)-[:crm_p140_assigned_attribute_to]->(p:crm_E21_Person) RETURN p", ident, authority);
-        Result r;
+    public Stream<PersonRecord> getPersonByIdent(@Name("ident") String ident, @Name("authority") String authority) {
+        List<PersonRecord> result = new ArrayList<>();
         try (Transaction tx = db.beginTx()) {
-            r = tx.execute(q);
-            tx.commit();
+            Set<Node> matchedIdents = new HashSet<>();
+            tx.findNodes(Label.label("crm_E42_Identifier"), "value", ident).forEachRemaining(n ->
+                    n.getRelationships(Direction.INCOMING, ev2id).forEach(m -> matchedIdents.add(m.getStartNode())));
+            Set<Node> matchedAuths = new HashSet<>();
+            tx.findNodes(Label.label("crm_E42_Identifier"), "value", ident).forEachRemaining(n ->
+                    n.getRelationships(Direction.INCOMING, ev2id).forEach(m -> matchedAuths.add(m.getStartNode())));
+            matchedIdents.retainAll(matchedAuths);
+            Set<Node> matchedPersons = matchedIdents.stream()
+                    .map(x -> x.getSingleRelationship(ev2p, Direction.OUTGOING).getEndNode())
+                    .collect(Collectors.toSet());
+            matchedPersons.forEach(p -> result.add(new PersonRecord(p)));
         }
-        ArrayList<Node> result = new ArrayList<>();
-        if (r.hasNext())
-            r.forEachRemaining(x -> result.add((Node) x.get("p")));
-
         return result.stream();
     }
 
-    /**
-     * Adds the distinct type of a relationship to the given List<String>
-     *
-     * @param list  the list to add the distinct relationship type to
-     * @param relationship  the relationship to get the name() from
-     */
-    private void AddDistinct(List<String> list, Relationship relationship){
-        AddDistinct(list, relationship.getType().name());
-    }
-
-    /**
-     * Adds an item to a List only if the item is not already in the List
-     *
-     * @param list  the list to add the distinct item to
-     * @param item  the item to add to the list
-     */
-    private <T> void AddDistinct(List<T> list, T item){
-        if(!list.contains(item))
-            list.add(item);
-    }
-
-    /**
-     * This is the output record for our search procedure. All procedures
-     * that return results return them as a Stream of Records, where the
-     * records are defined like this one - customized to fit what the procedure
-     * is returning.
-     * <p>
-     * These classes can only have public non-final fields, and the fields must
-     * be one of the following types:
-     *
-     * <ul>
-     *     <li>{@link String}</li>
-     *     <li>{@link Long} or {@code long}</li>
-     *     <li>{@link Double} or {@code double}</li>
-     *     <li>{@link Number}</li>
-     *     <li>{@link Boolean} or {@code boolean}</li>
-     *     <li>{@link Node}</li>
-     *     <li>{@link org.neo4j.graphdb.Relationship}</li>
-     *     <li>{@link org.neo4j.graphdb.Path}</li>
-     *     <li>{@link Map} with key {@link String} and value {@link Object}</li>
-     *     <li>{@link List} of elements of any valid field type, including {@link List}</li>
-     *     <li>{@link Object}, meaning any of the valid field types</li>
-     * </ul>
-     */
-    public static class RelationshipTypes {
+    public static class PersonRecord {
         // These records contain two lists of distinct relationship types going in and out of a Node.
-        public List<String> outgoing;
-        public List<String> incoming;
+        public Node personNode;
+        public Map<String,String> personIdents;
 
-        public RelationshipTypes(List<String> incoming, List<String> outgoing) {
-            this.outgoing = outgoing;
-            this.incoming = incoming;
+        public PersonRecord(Node person) {
+            this.personNode = person;
+            this.personIdents = new HashMap<>();
+            personNode.getRelationships(Direction.INCOMING, ev2p)
+                    .forEach(id -> {
+                        Node identifier = id.getStartNode().getSingleRelationship(ev2id, Direction.OUTGOING).getEndNode();
+                        Node agent = id.getStartNode().getSingleRelationship(ev2ag, Direction.OUTGOING).getEndNode();
+                        personIdents.put(identifier.getProperty("value").toString(), agent.getProperty("identifier").toString());
+                    });
         }
     }
 }
